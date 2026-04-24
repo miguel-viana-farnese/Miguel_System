@@ -12,11 +12,16 @@ class DatabaseManager:
         self.create_tables() 
         self.seed_data()
 
+    def add_stock(self, name, amount):
+        self.cursor.execute("UPDATE products SET stock = stock + ? WHERE name = ?", (amount, name))
+        self.conn.commit()
+
     def create_tables(self): 
-        self.cursor.execute('''CREATE TABLE IF NOT EXISTS sales
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS sales 
                               (id INTEGER PRIMARY KEY AUTOINCREMENT, total REAL, date TEXT)''') 
+        # Schema updated to include stock
         self.cursor.execute('''CREATE TABLE IF NOT EXISTS products 
-                              (name TEXT PRIMARY KEY, price REAL)''') 
+                              (name TEXT PRIMARY KEY, price REAL, stock INTEGER DEFAULT 0)''') 
         self.cursor.execute('''CREATE TABLE IF NOT EXISTS sale_items 
                               (id INTEGER PRIMARY KEY AUTOINCREMENT, product_name TEXT, quantity INTEGER, price REAL)''') 
         self.conn.commit()
@@ -24,16 +29,20 @@ class DatabaseManager:
     def seed_data(self): 
         self.cursor.execute("SELECT count(*) FROM products") 
         if self.cursor.fetchone()[0] == 0: 
-            sample_data = [("Item 1", 1.00), ("Item 2", 2.00), ("Item 3", 3.00)]
-            self.cursor.executemany("INSERT INTO products VALUES (?, ?)", sample_data)
+            sample_data = [("Item 1", 1.00, 10), ("Item 2", 2.00, 10), ("Item 3", 3.00, 10)]
+            self.cursor.executemany("INSERT INTO products (name, price, stock) VALUES (?, ?, ?)", sample_data)
             self.conn.commit()
 
     def get_products(self): 
-        self.cursor.execute("SELECT name, price FROM products ORDER BY name ASC")
+        self.cursor.execute("SELECT name, price, stock FROM products ORDER BY name ASC")
         return self.cursor.fetchall()
 
-    def add_product(self, name, price): 
-        self.cursor.execute("INSERT OR REPLACE INTO products VALUES (?, ?)", (name, price))
+    def add_product(self, name, price, stock): 
+        self.cursor.execute("INSERT OR REPLACE INTO products (name, price, stock) VALUES (?, ?, ?)", (name, price, stock))
+        self.conn.commit()
+
+    def update_stock(self, name, quantity_sold):
+        self.cursor.execute("UPDATE products SET stock = stock - ? WHERE name = ?", (quantity_sold, name))
         self.conn.commit()
 
     def delete_product(self, name): 
@@ -55,7 +64,7 @@ class DatabaseManager:
 class POSCalculator:
     def __init__(self, root): 
         self.root = root
-        self.root.title("Miguel System - v2.0")
+        self.root.title("Miguel System - v2.1")
         self.db = DatabaseManager()
         
         self.root.columnconfigure(0, weight=1)
@@ -112,8 +121,8 @@ class POSCalculator:
         for widget in self.scrollable_frame.winfo_children():
             widget.destroy()
         products = self.db.get_products()
-        for name, price in products:
-            btn = ttk.Button(self.scrollable_frame, text=name, 
+        for name, price, stock in products:
+            btn = ttk.Button(self.scrollable_frame, text=f"{name} ({stock})", 
                              command=lambda n=name, p=price: self.select_product(n, p))
             btn.pack(side="top", fill="x", padx=5, pady=2)
 
@@ -158,8 +167,7 @@ class POSCalculator:
         product_listbox = tk.Listbox(list_frame, width=30, height=10)
         product_listbox.pack(padx=5, pady=5)
         
-        products = self.db.get_products()
-        for p in products:
+        for p in self.db.get_products():
             product_listbox.insert(tk.END, p[0])
             
         def delete_selected():
@@ -182,30 +190,87 @@ class POSCalculator:
         ttk.Label(input_frame, text="Preço:").grid(row=1, column=0, padx=5, pady=5)
         price_entry = ttk.Entry(input_frame)
         price_entry.grid(row=1, column=1, padx=5, pady=5)
+
+        ttk.Label(input_frame, text="Estoque:").grid(row=2, column=0, padx=5, pady=5)
+        stock_entry = ttk.Entry(input_frame)
+        stock_entry.grid(row=2, column=1, padx=5, pady=5)
         
         def save():
             try:
-                self.db.add_product(name_entry.get().upper(), float(price_entry.get().replace(',', '.')))
+                self.db.add_product(name_entry.get().upper(), float(price_entry.get().replace(',', '.')), int(stock_entry.get()))
                 self.refresh_product_buttons()
                 product_listbox.insert(tk.END, name_entry.get().upper())
                 messagebox.showinfo("Sucesso", "Produto salvo!")
             except ValueError:
-                messagebox.showerror("Erro", "Preço inválido")
+                messagebox.showerror("Erro", "Valores inválidos")
             
-        ttk.Button(input_frame, text="Salvar", command=save).grid(row=2, column=0, columnspan=2, pady=10)
+        ttk.Button(input_frame, text="Salvar", command=save).grid(row=3, column=0, columnspan=2, pady=10)
 
     def open_report(self):
         top = tk.Toplevel(self.root)
-        top.title("Relatório de Vendas")
-        report_tree = ttk.Treeview(top, columns=("Produto", "Qtd Vendida", "Total Vendido"), show="headings")
+        top.title("Relatório e Estoque")
+        
+        notebook = ttk.Notebook(top)
+        notebook.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # Tab 1: Sales
+        sales_frame = ttk.Frame(notebook)
+        notebook.add(sales_frame, text="Relatório de Vendas")
+        report_tree = ttk.Treeview(sales_frame, columns=("Produto", "Qtd Vendida", "Total Vendido"), show="headings")
         for col in ("Produto", "Qtd Vendida", "Total Vendido"):
             report_tree.heading(col, text=col)
-        report_tree.pack(fill="both", expand=True, padx=10, pady=10)
+        report_tree.pack(fill="both", expand=True)
         for row in self.db.get_sales_report():
             report_tree.insert("", "end", values=(row[0], row[1], f"R$ {row[2]:.2f}"))
 
+        # Tab 2: Inventory
+        supply_frame = ttk.Frame(notebook)
+        notebook.add(supply_frame, text="Catálogo e Estoque")
+        
+        # Treeview definition
+        supply_tree = ttk.Treeview(supply_frame, columns=("Produto", "Preço", "Estoque"), show="headings")
+        for col in ("Produto", "Preço", "Estoque"):
+            supply_tree.heading(col, text=col)
+            supply_tree.column(col, width=100)
+        supply_tree.pack(fill="both", expand=True, pady=5)
+
+        def populate_supply_tree():
+            supply_tree.delete(*supply_tree.get_children())
+            for name, price, stock in self.db.get_products():
+                supply_tree.insert("", "end", values=(name, f"R$ {price:.2f}", stock))
+
+        populate_supply_tree()
+
+        # Controls to add stock
+        control_frame = ttk.Frame(supply_frame)
+        control_frame.pack(fill="x", pady=5)
+        
+        ttk.Label(control_frame, text="Qtd para adicionar:").pack(side="left", padx=5)
+        qty_entry = ttk.Entry(control_frame, width=10)
+        qty_entry.pack(side="left", padx=5)
+        
+        def handle_add_stock():
+            selected = supply_tree.selection()
+            if not selected:
+                messagebox.showwarning("Aviso", "Selecione um produto na lista.")
+                return
+            try:
+                amount = int(qty_entry.get())
+                item_data = supply_tree.item(selected[0], 'values')
+                product_name = item_data[0]
+                
+                self.db.add_stock(product_name, amount)
+                populate_supply_tree() # Refresh list in tab
+                self.refresh_product_buttons() # Refresh main home screen buttons
+                messagebox.showinfo("Sucesso", f"{amount} unidades adicionadas a {product_name}")
+            except ValueError:
+                messagebox.showerror("Erro", "Quantidade inválida.")
+
+        ttk.Button(control_frame, text="Adicionar ao Estoque", command=handle_add_stock).pack(side="left", padx=10)
+
     def add_item(self):
-        name = getattr(self, 'selected_product_name', "Produto Desconhecido")
+        name = getattr(self, 'selected_product_name', None)
+        if not name: return
         try:
             price = float(self.entry_price.get().replace(',', '.'))
             qty = int(self.entry_qty.get())
@@ -230,8 +295,13 @@ class POSCalculator:
         for child in self.tree.get_children():
             values = self.tree.item(child, 'values')
             items.append((values[0], float(values[1]), int(values[2])))
+        
         self.db.save_sale(self.grand_total, items)
-        messagebox.showinfo("Sucesso", "Venda registrada!")
+        for name, price, qty in items:
+            self.db.update_stock(name, qty)
+        
+        self.refresh_product_buttons()
+        messagebox.showinfo("Sucesso", "Venda registrada e estoque atualizado!")
         self.reset_sale()
 
     def reset_sale(self):
